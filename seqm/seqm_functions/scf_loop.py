@@ -14,6 +14,7 @@ from .diag import sym_eig_trunc, sym_eig_trunc1
 from .diag_d import sym_eig_truncd, sym_eig_trunc1d
 import warnings
 import time
+import numpy as np
 from .build_two_elec_one_center_int_D import calc_integral #, calc_integral_os
 #from .check import check
 #scf_backward==0: ignore the gradient on density matrix
@@ -443,6 +444,12 @@ def scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
         nDirect1 = scf_converger[3]
     except:
         nDirect1 = 1
+
+    try:
+        n_hist = scf_converger[4]
+    except:
+        n_hist = 1
+
     alpha_direct_increment = (alpha_direct_upper-alpha_direct)/(nDirect1 - n_direct_static_steps - 5)
     notconverged = torch.ones(nmol,dtype=torch.bool, device=M.device)
     
@@ -453,8 +460,15 @@ def scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
 
     dm_err = torch.ones(nmol, dtype=P.dtype, device=P.device)
     dm_element_err = torch.ones(nmol, dtype=P.dtype, device=P.device)
-    P_ab_new = torch.zeros_like(P)
-    P_ab_old = torch.zeros_like(P)
+
+    if n_hist == 1:
+        P_ab_new = torch.zeros_like(P)
+        P_ab_old = torch.zeros_like(P)
+    else:
+        P_ab_new = torch.zeros_like(P)
+        P_ab_old = torch.zeros((*P.shape, n_hist), dtype=P.dtype, device=P.device)
+        #FIXME if this works I need to add for backprop through SCF.
+
     if(themethod=='PM6'):
         Hcore = M.reshape(nmol,molsize,molsize,9,9) \
                  .transpose(2,3) \
@@ -501,9 +515,35 @@ def scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
             P = alpha_direct * P + (1.0 - alpha_direct) * P_ab_new
 
         else:
-            P_ab_old[notconverged] = P[notconverged]
-            #P[notconverged] = P_ab_new[notconverged]
-            P[notconverged] = alpha_direct * P[notconverged] + (1.0 - alpha_direct) * P_ab_new[notconverged]
+            tmp_writeable = P.clone()
+            np.save(f"DMs/{k}_dm.npy", tmp_writeable.cpu().numpy())
+            # Mixing with history.
+            if n_hist != 1:
+                # Cyclicly writes to overwrite only oldest DMs.
+                P_ab_old[notconverged,...,i%n_hist] = P[notconverged]
+                # NOTE indexing on P is P_nsij -> P_nsijt with history
+
+                # For iterations < n_hist we need to take care to not break dmat norm by including 0's in torch.mean.
+                if i < n_hist:
+                    P_mix = torch.mean(P_ab_old[notconverged,...,:i+1], dim = -1)
+                else:
+                    P_mix = torch.mean(P_ab_old[notconverged,..., :], dim = -1)
+
+                P[notconverged] = alpha_direct * P_mix + (1.0 - alpha_direct) * P_ab_new
+
+                # if i == 0:
+                    # import matplotlib.pyplot as plt
+                    # print(notconverged)
+                    # print(P_mix.shape)
+                    # plt.imshow(P_mix[notconverged,0,:,:][0].cpu().numpy())
+                    # plt.show()
+
+            # Mixing without history.
+            else:
+                P_ab_old[notconverged] = P[notconverged]
+                #P[notconverged] = P_ab_new[notconverged]
+                P[notconverged] = alpha_direct * P[notconverged] + (1.0 - alpha_direct) * P_ab_new[notconverged]
+
         if i >= n_direct_static_steps and i < nDirect1-5:
             alpha_direct += alpha_direct_increment
         elif i >= nDirect1 - 5:
@@ -511,27 +551,52 @@ def scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
             
             #alpha_direct = 0.9
         F = fock_u_batch(nmol, molsize, P, M, maskd, mask, idxi, idxj, w, W, gss, gpp, gsp, gp2, hsp, themethod, zetas, zetap, zetad, Z, F0SD, G2SD)
+   
+        if n_hist != 1:
+            # Density matrix convergence criteria
+            dm_err[notconverged] = torch.sqrt(torch.sum(torch.square(torch.sum(P[notconverged] - P_ab_old[notconverged,..., i%n_hist], dim=1)), dim = (1,2)) \
+                                     /((nSuperHeavy[notconverged] * 9 + nHeavy[notconverged] * 4 + nHydro[notconverged] * 4)**2)
+                        )
+            max_dm_err = torch.max(dm_err)
+            # Elementwise density matrix convergence criteria
+            dm_element_err[notconverged] = torch.amax(torch.abs(torch.sum(P[notconverged] - P_ab_old[notconverged,..., i%n_hist], dim=1)), dim=(1,2))
+            max_dm_element_err = torch.max(dm_element_err)
+            print(max_dm_err)
+            print('here')
 
-        dm_err[notconverged] = torch.sqrt(torch.sum(torch.square(torch.sum(P[notconverged] - P_ab_old[notconverged], dim=1)), dim = (1,2)) \
-                                 /((nSuperHeavy[notconverged] * 9 + nHeavy[notconverged] * 4 + nHydro[notconverged] * 4)**2)
-                    )
-        max_dm_err = torch.max(dm_err)
+        else:
+            # Density matrix convergence criteria
+            dm_err[notconverged] = torch.sqrt(torch.sum(torch.square(torch.sum(P[notconverged] - P_ab_old[notconverged], dim=1)), dim = (1,2)) \
+                                     /((nSuperHeavy[notconverged] * 9 + nHeavy[notconverged] * 4 + nHydro[notconverged] * 4)**2)
+                        )
+            max_dm_err = torch.max(dm_err)
 
-        dm_element_err[notconverged] = torch.amax(torch.abs(torch.sum(P[notconverged] - P_ab_old[notconverged], dim=1)), dim=(1,2))
-        max_dm_element_err = torch.max(dm_element_err)
+            # Elementwise density matrix convergence criteria
+            dm_element_err[notconverged] = torch.amax(torch.abs(torch.sum(P[notconverged] - P_ab_old[notconverged], dim=1)), dim=(1,2))
+            max_dm_element_err = torch.max(dm_element_err)
 
+        # Energy convergence criteria
         Eelec_new[notconverged] = elec_energy(P[notconverged], F[notconverged], Hcore[notconverged])
         err[notconverged] = torch.abs(Eelec_new[notconverged]-Eelec[notconverged])
         Eelec[notconverged] = Eelec_new[notconverged]
         #notconverged = err > eps
         max_err = torch.max(err)
+
+
         Nnot = torch.sum(notconverged).item()
         if debug: print("scf direct step  : {:>3d} | MAX \u0394E[{:>4d}]: {:>12.7f} | MAX \u0394DM[{:>4d}]: {:>12.7f} | MAX \u0394DM_ij[{:>4d}]: {:>10.7f}".format(
                         k, torch.argmax(err), max_err, torch.argmax(dm_err), max_dm_err, torch.argmax(dm_element_err), max_dm_element_err), " | N not converged:", Nnot)
 
 
-        k = k + 1
+        # This is needed temporarily because mixing history is only
+        # included in the direct step.
 
+        # if n_hist > 1 and i == nDirect1 - 1:
+            # tmp_old = P_ab_old[notconverged,...,i%n_hist].clone()
+            # P_ab_old = torch.zeros_like(P_ab_new)
+            # P_ab_old[notconverged] = tmp_old
+
+        k = k + 1 # not deleting just in case, why not i?
 
     if backward: fac_register = []
     init_fac = True
@@ -576,38 +641,71 @@ def scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
                                           )**2, dim=2 ) ).reshape(-1,2,1,1)
                     fac_register.append(f)
             else:
-                fac = torch.sqrt( torch.sum( (   P_ab_new[notconverged].diagonal(dim1=2,dim2=3)
-                                           - P[notconverged].diagonal(dim1=2,dim2=3) \
-                                         )**2, dim=2 ) / \
-                                  torch.sum( (   P_ab_new[notconverged].diagonal(dim1=2,dim2=3)
-                                           - P[notconverged].diagonal(dim1=2,dim2=3)*2.0
-                                           + P_ab_old[notconverged].diagonal(dim1=2,dim2=3)
-                                         )**2, dim=2 ) ).reshape(-1,2,1,1)
+                if n_hist != 1:
+                    fac = torch.sqrt( torch.sum( (   P_ab_new[notconverged].diagonal(dim1=2,dim2=3)
+                                               - P[notconverged].diagonal(dim1=2,dim2=3) \
+                                             )**2, dim=2 ) / \
+                                      torch.sum( (   P_ab_new[notconverged].diagonal(dim1=2,dim2=3)
+                                               - P[notconverged].diagonal(dim1=2,dim2=3)*2.0
+                                               + P_ab_old[notconverged,..., k%n_hist].diagonal(dim1=2,dim2=3)
+                                             )**2, dim=2 ) ).reshape(-1,2,1,1)
+                else:
+                    fac = torch.sqrt( torch.sum( (   P_ab_new[notconverged].diagonal(dim1=2,dim2=3)
+                                               - P[notconverged].diagonal(dim1=2,dim2=3) \
+                                             )**2, dim=2 ) / \
+                                      torch.sum( (   P_ab_new[notconverged].diagonal(dim1=2,dim2=3)
+                                               - P[notconverged].diagonal(dim1=2,dim2=3)*2.0
+                                               + P_ab_old[notconverged].diagonal(dim1=2,dim2=3)
+                                             )**2, dim=2 ) ).reshape(-1,2,1,1)
             #
             if backward:
                 P_ab_old = P + 0.0  # ???
                 P = (1. + fac_register[-1]) * P_ab_new - fac_register[-1] * P
                 #print(fac_register[-1])
+
             else:
-                P_ab_old[notconverged] = P[notconverged]
-                # if init_fac:
-                #     fac = fac*0.0 + 0.9
-                #     init_fac = False
-                P[notconverged] = ((1. + fac) * P_ab_new[notconverged] - fac * P[notconverged])
-                #P[notconverged] = (1. - fac) * P_ab_new[notconverged] + fac * P[notconverged]
+                tmp_writeable = P.clone()
+                np.save(f"DMs/{k}_dm.npy", tmp_writeable.cpu().numpy())
+                if n_hist != 1:
+                    # Cyclicly writes to overwrite only oldest DMs.
+                    P_ab_old[notconverged,...,k%n_hist] = P[notconverged]
+                    # NOTE indexing on P is P_nsij -> P_nsijt with history
+
+                    # For iterations < n_hist we need to take care to not break dmat norm by including 0's in torch.mean.
+                    if k < n_hist: # This should not get hit often because typically nDirect1>n_hist
+                        P_mix = torch.mean(P_ab_old[notconverged,...,:k+1], dim = -1)
+                    else:
+                        P_mix = torch.mean(P_ab_old[notconverged,..., :], dim = -1)
+
+
+                    P[notconverged] = ((1.0 + fac) * P_ab_new[notconverged] - fac * P_mix)
+
+                else:
+                    P_ab_old[notconverged] = P[notconverged]
+                    P[notconverged] = ((1. + fac) * P_ab_new[notconverged] - fac * P[notconverged])
             
             F = fock_u_batch(nmol, molsize, P, M, maskd, mask, idxi, idxj, w, W, gss, gpp, gsp, gp2, hsp, themethod, zetas, zetap, zetad, Z, F0SD, G2SD)
 
-            # DM change (not rms but something like that. can't use rms because of sqrt on a matrix)
-            dm_err[notconverged] = torch.sqrt(torch.sum(torch.square(torch.sum(P[notconverged] - P_ab_old[notconverged], dim=1)), dim = (1,2)) \
-                                 /((nSuperHeavy[notconverged] * 9 + nHeavy[notconverged] * 4 + nHydro[notconverged] * 4)**2)
-                    )
-            
-            max_dm_err = torch.max(dm_err)
+            if n_hist != 1:
+                # Density matrix convergence criteria
+                dm_err[notconverged] = torch.sqrt(torch.sum(torch.square(torch.sum(P[notconverged] - P_ab_old[notconverged,..., k%n_hist], dim=1)), dim = (1,2)) \
+                                         /((nSuperHeavy[notconverged] * 9 + nHeavy[notconverged] * 4 + nHydro[notconverged] * 4)**2)
+                            )
+                max_dm_err = torch.max(dm_err)
+                # Elementwise density matrix convergence criteria
+                dm_element_err[notconverged] = torch.amax(torch.abs(torch.sum(P[notconverged] - P_ab_old[notconverged,..., k%n_hist], dim=1)), dim=(1,2))
+                max_dm_element_err = torch.max(dm_element_err)
 
-            # maximum change in DM elements
-            dm_element_err[notconverged] = torch.amax(torch.abs(torch.sum(P[notconverged] - P_ab_old[notconverged], dim=1)), dim=(1,2))
-            max_dm_element_err = torch.max(dm_element_err)
+            else:
+                # Density matrix convergence criteria
+                dm_err[notconverged] = torch.sqrt(torch.sum(torch.square(torch.sum(P[notconverged] - P_ab_old[notconverged], dim=1)), dim = (1,2)) \
+                                         /((nSuperHeavy[notconverged] * 9 + nHeavy[notconverged] * 4 + nHydro[notconverged] * 4)**2)
+                            )
+                max_dm_err = torch.max(dm_err)
+
+                # Elementwise density matrix convergence criteria
+                dm_element_err[notconverged] = torch.amax(torch.abs(torch.sum(P[notconverged] - P_ab_old[notconverged], dim=1)), dim=(1,2))
+                max_dm_element_err = torch.max(dm_element_err)
                                  
 
             #
@@ -1169,8 +1267,10 @@ class SCF(torch.autograd.Function):
                 maskd, mask, atom_molid, pair_molid, idxi, idxj, P, eps, themethod, zetas, zetap, zetad, Z, F0SD, G2SD):
         
         SCF.themethod = themethod
+        print(SCF.converger)
         if SCF.converger[0] == 0:
             if P.dim() == 4:
+                print("we should absolutely NOT be here")
                 P, notconverged = scf_forward0_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
                                    nHydro, nHeavy, nSuperHeavy, nOccMO, \
                                    nmol, molsize, \
@@ -1186,12 +1286,16 @@ class SCF(torch.autograd.Function):
                                    maskd, mask, idxi, idxj, P, eps, SCF.converger[1])
         else:
             if SCF.converger[0] == 1: # adaptive mixing
+                print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+                print("we should be here")
                 if P.dim() == 4:
+                    print("we should absolutely be here")
                     P, notconverged = scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
                            nHydro, nHeavy, nSuperHeavy, nOccMO, \
                            nmol, molsize, \
                            maskd, mask, idxi, idxj, P, eps, themethod, zetas, zetap, zetad, Z, F0SD, G2SD, sp2=SCF.sp2, scf_converger=SCF.converger)
                 else:
+                    print("we should absolutely NOT be here")
                     P, notconverged = scf_forward1(M, w, W, gss, gpp, gsp, gp2, hsp, \
                                                 nHydro, nHeavy, nSuperHeavy, nOccMO, \
                                                 nmol, molsize, \
