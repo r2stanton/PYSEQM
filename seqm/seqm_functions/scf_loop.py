@@ -561,8 +561,6 @@ def scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
             # Elementwise density matrix convergence criteria
             dm_element_err[notconverged] = torch.amax(torch.abs(torch.sum(P[notconverged] - P_ab_old[notconverged,..., i%n_hist], dim=1)), dim=(1,2))
             max_dm_element_err = torch.max(dm_element_err)
-            print(max_dm_err)
-            print('here')
 
         else:
             # Density matrix convergence criteria
@@ -1267,10 +1265,8 @@ class SCF(torch.autograd.Function):
                 maskd, mask, atom_molid, pair_molid, idxi, idxj, P, eps, themethod, zetas, zetap, zetad, Z, F0SD, G2SD):
         
         SCF.themethod = themethod
-        print(SCF.converger)
         if SCF.converger[0] == 0:
             if P.dim() == 4:
-                print("we should absolutely NOT be here")
                 P, notconverged = scf_forward0_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
                                    nHydro, nHeavy, nSuperHeavy, nOccMO, \
                                    nmol, molsize, \
@@ -1286,16 +1282,12 @@ class SCF(torch.autograd.Function):
                                    maskd, mask, idxi, idxj, P, eps, SCF.converger[1])
         else:
             if SCF.converger[0] == 1: # adaptive mixing
-                print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-                print("we should be here")
                 if P.dim() == 4:
-                    print("we should absolutely be here")
                     P, notconverged = scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
                            nHydro, nHeavy, nSuperHeavy, nOccMO, \
                            nmol, molsize, \
                            maskd, mask, idxi, idxj, P, eps, themethod, zetas, zetap, zetad, Z, F0SD, G2SD, sp2=SCF.sp2, scf_converger=SCF.converger)
                 else:
-                    print("we should absolutely NOT be here")
                     P, notconverged = scf_forward1(M, w, W, gss, gpp, gsp, gp2, hsp, \
                                                 nHydro, nHeavy, nSuperHeavy, nOccMO, \
                                                 nmol, molsize, \
