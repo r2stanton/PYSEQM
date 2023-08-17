@@ -23,6 +23,8 @@ from .build_two_elec_one_center_int_D import calc_integral #, calc_integral_os
 
 debug = False
 MAX_ITER = 2000
+MIN_ITER_BEFORE_EARLY_STOP = 50
+FRAC_EARLY_STOP = .05
 RAISE_ERROR_IF_SCF_FORWARD_FAILS = False
 #if true, raise error rather than ignore those non-convered molecules
 
@@ -719,6 +721,12 @@ def scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
                             k, torch.argmax(err), max_err, torch.argmax(dm_err), max_dm_err, torch.argmax(dm_element_err), max_dm_element_err), " | N not converged:", Nnot)
             k = k + 1
             if k >= MAX_ITER: return P, notconverged
+
+            # Let's add another early stopping criteria which stops the calculation
+            # immediately once we've converged some % of the structures, and 
+            # also satisfied some minimum number of iterations.
+            if torch.sum(notconverged)/notconverged.shape[0] < FRAC_EARLY_STOP and k > MIN_ITER_BEFORE_EARLY_STOP:
+                return P, notconverged
             
 
         else:
