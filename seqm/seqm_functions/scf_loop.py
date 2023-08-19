@@ -649,6 +649,7 @@ def scf_forward1_u(M, w, W, gss, gpp, gsp, gp2, hsp, \
                                                - P[notconverged].diagonal(dim1=2,dim2=3)*2.0
                                                + P_ab_old[notconverged,..., k%n_hist-1].diagonal(dim1=2,dim2=3)
                                              )**2, dim=2 ) ).reshape(-1,2,1,1)
+                    #FIXME might be worth incorporating density history into adaptive factor.
                 else:
                     fac = torch.sqrt( torch.sum( (   P_ab_new[notconverged].diagonal(dim1=2,dim2=3)
                                                - P[notconverged].diagonal(dim1=2,dim2=3) \
